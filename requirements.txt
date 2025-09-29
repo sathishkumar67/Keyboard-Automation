@@ -1,0 +1,14 @@
+accelerate
+matplotlib
+pillow
+pydantic
+requests
+transformers
+pyautogui
+mss 
+opencv-python 
+numpy
+gradio-client
+gradio
+groq
+python-dotenv

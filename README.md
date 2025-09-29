@@ -1,2 +1,2 @@
-# Keyboard-Automation
-Automating Keyboard Actions
+# Browser-Automation
+Automating Browser
