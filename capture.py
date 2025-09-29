@@ -1,21 +1,20 @@
 from __future__ import annotations
 import os
 import mss
-from PIL import Image  
+from PIL import Image
 from datetime import datetime
 
-def take_screenshot() -> Image.Image:
+def take_screenshot() -> str:
     """
-    Captures a screenshot of the primary monitor and returns it as a PIL Image object.
+    Captures a screenshot of the primary monitor and saves it to the 'screenshots' directory.
 
-    This function uses the `mss` library to capture the screen and the `PIL` library to convert
-    the raw screenshot data into an image object. The screenshot is not saved to disk; it is
-    returned directly as a PIL Image for further processing or saving as needed.
+    This function uses the `mss` library to capture the screen and saves the screenshot as a PNG file
+    in the 'screenshots' directory. The file is named with a timestamp to ensure uniqueness.
 
     Returns:
-        Image.Image: Screenshot as a PIL Image object.
+        str: The file path of the saved screenshot.
     """
-    # create a screenshot directory if it doesn't exist
+    # Ensure the 'screenshots' directory exists; create it if it doesn't
     if not os.path.exists("screenshots"):
         os.makedirs("screenshots")
 
@@ -25,7 +24,13 @@ def take_screenshot() -> Image.Image:
         monitor = sct.monitors[1]
         # Capture the screen contents of the primary monitor
         screenshot = sct.grab(monitor)
+
+        # Generate a timestamped filename for the screenshot
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join("screenshots", f"screenshot_{ts}.png")
+
+        # Save the screenshot as a PNG file
         mss.tools.to_png(screenshot.rgb, screenshot.size, output=path)
+
+        # Return the file path of the saved screenshot
         return path
