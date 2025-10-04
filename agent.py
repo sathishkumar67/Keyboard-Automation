@@ -1,3 +1,4 @@
+# necessary imports
 from __future__ import annotations
 import os
 import json
@@ -12,7 +13,8 @@ load_dotenv()
 # Initialize the Groq client with the API key from environment variables
 client = Groq(api_key=os.getenv("GROQ_API_KEY1"))
 
-def perform_task(query: str):
+# Main function to perform the task based on user query
+def perform_task(query: str) -> None:
     # System context - only included once at the beginning
     SYSTEM_CONTEXT = {
         "role": "system",
@@ -90,8 +92,11 @@ def perform_task(query: str):
             }
         ]
     }
+    
+    # Add the initial user message to messages
     messages.append(initial_user_message)
     
+    # Main interaction loop
     while True:
         # Take current screenshot
         screen_shot = encode_image_to_data_uri(take_screenshot())
@@ -116,6 +121,7 @@ def perform_task(query: str):
         # Add current state to messages (maintaining full context)
         current_messages = messages + [current_state_message]
         
+        # Get completion from the model
         completion = client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=current_messages,
@@ -126,6 +132,7 @@ def perform_task(query: str):
             stop=None
         )
 
+        # Extract the model's response
         response = completion.choices[0].message.content
         print(response)
         
@@ -134,15 +141,19 @@ def perform_task(query: str):
             "role": "assistant",
             "content": response
         }
+        # Append the AI response to messages
         messages.append(ai_response_message)
 
         # Extract the dictionary part
         start = response.find('{')
         end = response.rfind('}') + 1
         
+        # If a JSON object is found, parse and execute the action
         if start != -1 and end != 0:
+            # Extract the JSON string
             dict_str = response[start:end]
             try:
+                # Parse the JSON string to a dictionary
                 parsed = json.loads(dict_str)
                 if parsed.get("tool") == "action":
                     # Execute the action
@@ -154,28 +165,36 @@ def perform_task(query: str):
                     }
                     messages.append(action_feedback)
                 elif parsed.get("tool") == "task_complete":
+                    # Task is complete, exit the loop
                     print("Task completed successfully.")
                     break
                 else:
+                    # Unknown tool, provide feedback
                     print("Unknown tool in response:", parsed.get("tool"))
                     break
-            except Exception as e:  
+            except Exception as e: 
+                # Handle JSON parsing or execution errors 
                 print("Error parsing or executing response:", e)
                 # Add error feedback to context
                 error_feedback = {
                     "role": "user", 
                     "content": f"Error occurred: {str(e)}. Please adjust your approach."
                 }
+                # Append error feedback to messages
                 messages.append(error_feedback)
         else:
+            # No JSON object found, provide feedback
             print("No JSON object found in response:", response)
             # Add feedback about invalid response format
             format_feedback = {
                 "role": "user",
                 "content": "Your response should contain a JSON object with the required structure. Please provide a valid response."
             }
+            # Append format feedback to messages
             messages.append(format_feedback)
 
 if __name__ == "__main__":
+    # Enter the user's request
     query = input("Enter your request: ")
+    # Call the function to perform the task
     perform_task(query)
