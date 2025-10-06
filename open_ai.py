@@ -2,12 +2,7 @@ import os
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from capture import take_screenshot
-import base64
-
-def encode_image_to_base64(image_path):
-    """Encode image to base64 string"""
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+from utils import encode_image_to_base64
 
 # Load environment variables from the .env file
 load_dotenv()
