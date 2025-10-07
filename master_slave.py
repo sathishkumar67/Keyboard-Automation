@@ -54,30 +54,22 @@ If the overall task is complete, output:
 SLAVE_PROMPT = """
 You are an expert GUI automation action executor. Your role is to:
 1. Execute precise keyboard actions based on the current screen state
-2. Use keyboard shortcuts and typing operations
-3. You can use any Python library for keyboard actions including pyautogui, keyboard, pynput, or others
-4. Provide exact code to perform the requested action
+2. Use only the pynput library for keyboard operations
+3. Provide exact code to perform the requested action
+4. Use keyboard shortcuts for navigation (e.g., Ctrl+L for address bar, Ctrl+T for new tab)
 5. Verify the action was successful
 
-Available libraries and their usage:
-- keyboard: keyboard.send('ctrl+v'), keyboard.write('text'), keyboard.send('ctrl+t'), keyboard.send('ctrl+l')
-- pynput: from pynput.keyboard import Key, Controller; keyboard = Controller(); keyboard.press(Key.ctrl); keyboard.press('v'); keyboard.release('v'); keyboard.release(Key.ctrl)
-- pyautogui: pyautogui.hotkey('ctrl', 't'), pyautogui.hotkey('ctrl', 'l'), pyautogui.write('text'), pyautogui.press('enter'), pyautogui.hotkey('ctrl', 'v'), pyautogui.hotkey('ctrl', 'c'), pyautogui.hotkey('ctrl', 'x'), pyautogui.hotkey('tab'), pyautogui.hotkey('shift', 'tab')
-
-When navigating or focusing on elements, always use appropriate keyboard shortcuts like:
-- Ctrl+L to focus address bar
-- Ctrl+T to open new tab
-- Ctrl+W to close tab
-- Ctrl+Tab to switch tabs
-- Ctrl+Shift+Tab to switch tabs backward
-- Tab/Shift+Tab to navigate elements
-- Ctrl+C/Ctrl+V for copy/paste
+Available actions with pynput:
+- Keyboard shortcuts: keyboard.press(Key.ctrl_l); keyboard.release(Key.ctrl_l); keyboard.press('t'); keyboard.release('t') -> Ctrl+T
+- Single keys: keyboard.press(Key.enter); keyboard.release(Key.enter)
+- Typing: keyboard.type('text')
+- Special keys: Key.enter, Key.tab, Key.esc, Key.space, etc.
 
 Output Format:
 {
     "tool": "action",
     "description": "Clear description of what the action does",
-    "program": "Python code to execute the action using appropriate libraries",
+    "program": "Python code to execute the action using pynput.keyboard",
     "expected_result": "What should happen after this action",
     "verification_hint": "How to verify the action was successful in the next screenshot"
 }
@@ -86,7 +78,7 @@ Example:
 {
     "tool": "action",
     "description": "Open new tab and navigate to Google",
-    "program": "import keyboard; keyboard.send('ctrl+t'); time.sleep(0.5); keyboard.send('ctrl+l'); keyboard.write('https://www.google.com'); keyboard.send('enter')",
+    "program": "from pynput.keyboard import Key, Listener, Controller; import time; keyboard = Controller(); keyboard.press(Key.ctrl_l); keyboard.release(Key.ctrl_l); keyboard.press('t'); keyboard.release('t'); time.sleep(0.5); keyboard.press(Key.ctrl_l); keyboard.release(Key.ctrl_l); keyboard.press('l'); keyboard.release('l'); keyboard.type('https://www.google.com'); keyboard.press(Key.enter); keyboard.release(Key.enter)",
     "expected_result": "New tab opens with Google homepage",
     "verification_hint": "Check for Google logo and search bar"
 }
@@ -157,7 +149,7 @@ class MasterSlaveGUIAgent:
                 "role": "user", 
                 "content": [
                     {"type": "text", "text": f"User Query: {user_query}\n\nCurrent Task: Plan the automation steps needed to complete this task. Consider the current screen state and break down into executable sub-tasks."},
-                    {"type": "image_url", "image_url": {"url": f"image/jpeg;base64,{current_image_base64}"}}
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{current_image_base64}"}}
                 ]
             }
         ]
@@ -189,7 +181,7 @@ class MasterSlaveGUIAgent:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Current Task: {task_description}\n\nReasoning: {reasoning}\n\nBased on the current screen state, provide the specific keyboard action to execute this task. Focus on precise, executable code using keyboard shortcuts for navigation."},
+                    {"type": "text", "text": f"Current Task: {task_description}\n\nReasoning: {reasoning}\n\nBased on the current screen state, provide the specific keyboard action to execute this task. Use pynput library for keyboard operations. Focus on precise, executable code."},
                     {"type": "image_url", "image_url": {"url": f"image/jpeg;base64,{current_image_base64}"}}
                 ]
             }
