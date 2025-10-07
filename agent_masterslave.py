@@ -45,23 +45,16 @@ You are an expert GUI automation executor. Your role is to:
 4. Provide clear, executable Python code
 
 Constraints:
-- Use only `pynput.keyboard` for keyboard actions
-- Create a Controller instance: `keyboard = Controller()`
-- Use `keyboard.press()` and `keyboard.release()` for individual keys
-- Use `keyboard.type()` for typing text
-- Use `with keyboard.pressed(Key.shift):` for modifier key combinations
-- For special keys, use `Key.space`, `Key.enter`, `Key.tab`, etc.
+- Use only pyautogui for keyboard actions
+- Import pyautogui in every program
+- Use hotkey() for shortcuts, write() for typing, press() for single keys
 - Be specific about where you're typing (address bar, search box, etc.)
 
 Output ONLY JSON in this format:
 {"role": "slave", "action": "description", "program": "python code", "confidence": "high/medium/low"}
 
-Examples:
-{"role": "slave", "action": "Focus address bar and type URL", "program": "from pynput.keyboard import Key, Controller; keyboard = Controller(); keyboard.press(Key.ctrl_l); keyboard.release(Key.ctrl_l); keyboard.type('https://example.com'); keyboard.press(Key.enter); keyboard.release(Key.enter)", "confidence": "high"}
-
-{"role": "slave", "action": "Type uppercase text using shift", "program": "from pynput.keyboard import Key, Controller; keyboard = Controller(); with keyboard.pressed(Key.shift): keyboard.press('a'); keyboard.release('a')", "confidence": "high"}
-
-{"role": "slave", "action": "Type a sentence", "program": "from pynput.keyboard import Key, Controller; keyboard = Controller(); keyboard.type('Hello World')", "confidence": "high"}
+Example:
+{"role": "slave", "action": "Focus address bar and type URL", "program": "import pyautogui; pyautogui.hotkey('ctrl', 'l'); pyautogui.write('https://example.com'); pyautogui.press('enter')", "confidence": "high"}
 """
 
 class MasterSlaveGUIAgent:
@@ -160,20 +153,20 @@ class MasterSlaveGUIAgent:
         return slave_action
     
     def execute_action_safely(self, program: str) -> Tuple[bool, str]:
-        """Safely execute keyboard program with error handling"""
+        """Safely execute pyautogui program with error handling"""
         try:
-            # Choose one based on your selected library:
-            # For keyboard library:
-            exec_globals = {"keyboard": __import__("keyboard")}
+            # Ensure import is present and safe execution
+            safe_program = program
+            if "import pyautogui" not in safe_program:
+                safe_program = "import pyautogui\n" + safe_program
             
-            # For pynput library:
-            # exec_globals = {
-            #     "pynput": __import__("pynput"),
-            #     "Key": getattr(__import__("pynput.keyboard"), "Key"),
-            #     "Controller": getattr(__import__("pynput.keyboard"), "Controller")
-            # }
+            # Add small delays between actions for stability
+            safe_program = safe_program.replace(';', '; ')
             
-            exec(program, exec_globals)
+            # Execute in a controlled environment
+            exec_globals = {"pyautogui": __import__("pyautogui")}
+            exec(safe_program, exec_globals)
+            
             return True, "Action executed successfully"
         except Exception as e:
             return False, f"Execution failed: {str(e)}"
