@@ -46,7 +46,7 @@ Important Notes:
     1. Always analyze the current screenshot before taking any action.
     2. If an action does not lead to the expected result of the task, adjust your approach based on the new screenshot.
     3. You will reason step-by-step before taking any action.
-Example:
+Example: # if error occurs remove this
     query: program to open a new tab and navigate to a URL
     initial screenshot: (screenshot of a browser)
     reasoning: I need to open a new tab and navigate to a URL. To do this, I will:
