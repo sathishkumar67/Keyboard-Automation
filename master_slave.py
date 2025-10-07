@@ -1,12 +1,13 @@
 from __future__ import annotations
 import os
 import json
+import re
 import time
+from typing import Dict, List, Any, Optional, Tuple
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from capture import take_screenshot
 from utils import encode_image_to_base64
-
 
 # Load environment variables
 load_dotenv()
@@ -15,265 +16,386 @@ load_dotenv()
 client = AzureOpenAI(
     api_version="2025-03-01-preview",
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    azure_endpoint="https://harsh-mamhtiwt-eastus2.cognitiveservices.azure.com/  "
+    azure_endpoint="https://harsh-mamhtiwt-eastus2.cognitiveservices.azure.com/"
 )
 
-# Master planner prompt - focuses on high-level strategy and task decomposition
-MASTER_PROMPT = """
-You are an expert GUI automation task planner. Your role is to:
-1. Analyze the user query and current screen state
-2. Break down the complex task into smaller, executable sub-tasks
-3. Plan the sequence of actions needed to complete the overall task
-4. Monitor progress and adjust the plan as needed
+# System prompts for different roles
+MASTER_SYSTEM_PROMPT = """
+You are a master GUI automation planner. Your role is to:
+1. Analyze the user's high-level task and break it down into logical steps
+2. Determine when to delegate to the slave executor
+3. Monitor progress and adjust plans based on results
+4. Declare task completion only when the entire objective is achieved
 
-You receive the current screenshot and user query, then output a high-level plan with:
-- Current task status
-- Next sub-task to execute
-- Success criteria for each sub-task
-- Plan adjustments if previous actions failed
+You receive screenshots and decide whether to:
+- Create a multi-step plan for complex tasks
+- Delegate immediate actions to the slave
+- Verify task completion
 
-Output Format:
-{
-    "tool": "planning",
-    "current_task": "Description of the current sub-task",
-    "success_criteria": "How to verify this sub-task was completed successfully",
-    "next_action_type": "action/verification/wait",
-    "plan_status": "planning/in_progress/completed/failed",
-    "reasoning": "Your step-by-step reasoning about the current state and next steps"
-}
-
-If the overall task is complete, output:
-{
-    "tool": "task_complete",
-    "summary": "Brief summary of what was accomplished",
-    "reasoning": "Why the task is considered complete"
-}
+Output format:
+- For planning: {"role": "planner", "plan": ["step1", "step2", ...], "next_action": "delegate_to_slave"}
+- For verification: {"role": "verifier", "status": "complete/incomplete", "reason": "..."}
+- For delegation: {"role": "master", "instruction": "specific action for slave", "expectation": "what to expect"}
 """
 
-# Slave executor prompt - focuses on specific action execution
-SLAVE_PROMPT = """
-You are an expert GUI automation action executor. Your role is to:
-1. Execute precise keyboard actions based on the current screen state
-2. Use only keyboard shortcuts and typing operations
-3. Provide exact code to perform the requested action
-4. Verify the action was successful
+SLAVE_SYSTEM_PROMPT = """
+You are an expert GUI automation executor. Your role is to:
+1. Execute single, focused actions based on the master's instructions
+2. Analyze screenshots to determine exact keyboard actions needed
+3. Report results back to the master
+4. Handle retries and error recovery for individual actions
 
-Available actions:
-- Keyboard shortcuts: pyautogui.hotkey('ctrl', 't'), pyautogui.hotkey('ctrl', 'l'), etc.
-- Typing: pyautogui.write('text'), pyautogui.press('enter')
-- Navigation: Use appropriate shortcuts to focus on correct elements first
+You can only interact with the GUI using keyboard actions. Use keyboard shortcuts to navigate and perform tasks.
 
-Output Format:
-{
-    "tool": "action",
-    "description": "Clear description of what the action does",
-    "program": "Python code to execute the action using pyautogui",
-    "expected_result": "What should happen after this action",
-    "verification_hint": "How to verify the action was successful in the next screenshot"
-}
+Process Flow:
+1. Analyze current screenshot and master's instruction
+2. Determine the exact keyboard action sequence
+3. Execute and report results
 
-Example:
-{
-    "tool": "action",
-    "description": "Open new tab and navigate to Google",
-    "program": "import pyautogui; pyautogui.hotkey('ctrl', 't'); time.sleep(0.5); pyautogui.hotkey('ctrl', 'l'); pyautogui.write('https://www.google.com'); pyautogui.press('enter')",
-    "expected_result": "New tab opens with Google homepage",
-    "verification_hint": "Check for Google logo and search bar"
-}
+Output format:
+- For actions: {"role": "executor", "action": "description", "program": "pyautogui code", "confidence": "high/medium/low"}
+- For results: {"role": "executor", "result": "success/partial/failure", "observation": "what happened", "suggestion": "next step"}
+- For errors: {"role": "executor", "error": "description", "recovery_action": "suggested fix"}
 """
 
+ACTION_VALIDATION_PROMPT = """
+Quickly validate if this action makes sense for the current screen. Respond with JSON only:
+{"valid": true/false, "reason": "brief explanation", "suggestion": "if invalid"}
+"""
 
-class MasterSlaveGUIAgent:
+class GUIAutomationAgent:
     def __init__(self):
         self.client = client
-        self.messages_history = []
-        self.task_completed = False
-        self.max_iterations = 50  # Prevent infinite loops
-        self.iteration_count = 0
+        self.conversation_history: List[Dict] = []
+        self.current_plan: List[str] = []
+        self.current_step: int = 0
+        self.last_screenshot: Optional[str] = None
+        self.retry_count: int = 0
+        self.max_retries: int = 3
         
-    def call_model(self, messages, model_name="gpt-4.1"):
-        """Make API call to Azure OpenAI with error handling"""
+    def get_fresh_screenshot(self) -> str:
+        """Take and encode a fresh screenshot"""
+        screenshot_path = take_screenshot()
+        return encode_image_to_base64(screenshot_path)
+    
+    def call_model(self, messages: List[Dict], model: str = "gpt-4.1") -> str:
+        """Make API call to Azure OpenAI"""
         try:
             completion = self.client.chat.completions.create(
-                model=model_name,
+                model=model,
                 messages=messages,
                 max_tokens=1024,
-                temperature=0.3,  # Lower temperature for more consistent planning
+                temperature=0.7,  # Lower temperature for more consistent actions
                 top_p=0.9,
                 stream=False
             )
             return completion.choices[0].message.content
         except Exception as e:
-            print(f"Error calling Azure OpenAI: {e}")
-            return f"API call failed: {str(e)}. Please retry or adjust."
-
-    def extract_json_from_response(self, response_text):
-        """Extract JSON object from response text"""
-        start = response_text.find('{')
-        end = response_text.rfind('}') + 1
-        if start != -1 and end > start:
-            json_str = response_text[start:end]
-            try:
-                return json.loads(json_str)
-            except Exception as e:
-                print(f"Error parsing JSON: {e}")
-                return None
-        return None
-
-    def get_current_screenshot_data(self):
-        """Take screenshot and encode it"""
-        screenshot_path = take_screenshot()
-        image_base64 = encode_image_to_base64(screenshot_path)
-        return image_base64
-
-    def execute_action(self, action_json):
-        """Execute the action and handle errors"""
+            print(f"API call failed: {e}")
+            raise
+    
+    def extract_json(self, text: str) -> Optional[Dict]:
+        """Extract JSON from model response"""
         try:
-            program_code = action_json.get("program", "")
-            if program_code:
-                exec(program_code)
-                return True, "Action executed successfully"
+            # Look for JSON pattern
+            json_match = re.search(r'\{.*\}', text, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+        except:
+            pass
+        return None
+    
+    def validate_action(self, action: Dict, screenshot: str) -> Tuple[bool, str]:
+        """Quick validation of proposed action"""
+        validation_messages = [
+            {"role": "system", "content": ACTION_VALIDATION_PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": f"Action to validate: {json.dumps(action)}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot}"}}
+            ]}
+        ]
+        
+        try:
+            response = self.call_model(validation_messages)
+            validation = self.extract_json(response)
+            if validation and validation.get("valid", False):
+                return True, validation.get("suggestion", "Action looks good")
+            else:
+                return False, validation.get("reason", "Action invalid")
+        except:
+            return True, "Validation skipped"  # Proceed if validation fails
+    
+    def master_planning_phase(self, query: str, screenshot: str) -> Dict:
+        """Master analyzes task and creates initial plan"""
+        messages = [
+            {"role": "system", "content": MASTER_SYSTEM_PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": f"User task: {query}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot}"}}
+            ]}
+        ]
+        
+        response = self.call_model(messages)
+        master_decision = self.extract_json(response)
+        
+        if not master_decision:
+            # Fallback: delegate directly to slave
+            master_decision = {
+                "role": "master", 
+                "instruction": query,
+                "expectation": "Complete the requested task"
+            }
+        
+        return master_decision
+    
+    def slave_execution_phase(self, instruction: str, screenshot: str, context: List[Dict] = None) -> Dict:
+        """Slave executes specific instructions"""
+        messages = [
+            {"role": "system", "content": SLAVE_SYSTEM_PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": f"Master instruction: {instruction}\n\nPrevious context: {json.dumps(context[-2:] if context else [])}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot}"}}
+            ]}
+        ]
+        
+        response = self.call_model(messages)
+        slave_action = self.extract_json(response)
+        
+        if not slave_action:
+            # Fallback action
+            slave_action = {
+                "role": "executor",
+                "action": "Fallback: Press Escape to clear state",
+                "program": "import pyautogui; pyautogui.press('esc')",
+                "confidence": "low"
+            }
+        
+        return slave_action
+    
+    def execute_action_program(self, program: str) -> bool:
+        """Safely execute pyautogui program"""
+        try:
+            # Add import if not present
+            if "import pyautogui" not in program:
+                program = "import pyautogui\n" + program
+            
+            # Execute the program
+            exec(program, {"pyautogui": __import__("pyautogui")})
+            return True
         except Exception as e:
-            error_msg = f"Action execution failed: {str(e)}"
-            print(error_msg)
-            return False, error_msg
-        return False, "No program code to execute"
-
-    def run_master_planning(self, user_query, current_image_base64):
-        """Master: Plan the high-level task"""
+            print(f"Action execution failed: {e}")
+            return False
+    
+    def master_verification_phase(self, query: str, screenshot: str, history: List[Dict]) -> Dict:
+        """Master verifies if task is complete"""
+        recent_history = history[-3:]  # Last 3 interactions
+        
         messages = [
-            {"role": "system", "content": MASTER_PROMPT},
-            {
-                "role": "user", 
-                "content": [
-                    {"type": "text", "text": f"User Query: {user_query}\n\nCurrent Task: Plan the automation steps needed to complete this task. Consider the current screen state and break down into executable sub-tasks."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{current_image_base64}"}}
-                ]
-            }
+            {"role": "system", "content": MASTER_SYSTEM_PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": f"Original task: {query}\nRecent actions: {json.dumps(recent_history)}\nIs the task complete?"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot}"}}
+            ]}
         ]
         
         response = self.call_model(messages)
-        print(f"Master Planning: {response}")
+        verification = self.extract_json(response)
         
-        parsed_response = self.extract_json_from_response(response)
-        if parsed_response:
-            return parsed_response
-        else:
-            # Fallback: create a simple action request
-            return {
-                "tool": "planning",
-                "current_task": "Continue with user query",
-                "success_criteria": "Progress toward user goal",
-                "next_action_type": "action",
-                "plan_status": "in_progress",
-                "reasoning": "Failed to parse master response, continuing with basic approach"
-            }
-
-    def run_slave_execution(self, planning_info, current_image_base64):
-        """Slave: Execute specific actions based on planning"""
-        task_description = planning_info.get("current_task", "Perform user request")
-        reasoning = planning_info.get("reasoning", "Execute the next step")
+        if not verification:
+            verification = {"role": "verifier", "status": "incomplete", "reason": "Unable to verify"}
         
-        messages = [
-            {"role": "system", "content": SLAVE_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"Current Task: {task_description}\n\nReasoning: {reasoning}\n\nBased on the current screen state, provide the specific keyboard action to execute this task. Focus on precise, executable code."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{current_image_base64}"}}
-                ]
-            }
-        ]
-        
-        response = self.call_model(messages)
-        print(f"Slave Execution: {response}")
-        
-        parsed_response = self.extract_json_from_response(response)
-        if parsed_response:
-            return parsed_response
-        else:
-            # Fallback: indicate need for re-planning
-            return {
-                "tool": "action",
-                "description": "Need to re-plan due to parsing error",
-                "program": "",
-                "expected_result": "Re-plan the approach",
-                "verification_hint": "Wait for new plan"
-            }
-
-    def verify_action_success(self, action_info, current_image_base64):
-        """Verify if the previous action was successful"""
-        expected_result = action_info.get("expected_result", "Action completed")
-        verification_hint = action_info.get("verification_hint", "Check screenshot for changes")
-        
-        # Instead of calling API again, we'll use the next screenshot automatically
-        # This is handled in the main loop by checking the new state
-        return True  # Assume success, let next iteration verify
-
-    def run(self, user_query):
-        """Main execution loop with master-slave architecture"""
-        print(f"Starting task: {user_query}")
+        return verification
+    
+    def perform_task(self, query: str) -> None:
+        """Main task execution loop with master-slave architecture"""
+        print(f"Starting task: {query}")
         
         # Initial screenshot
-        current_image_base64 = self.get_current_screenshot_data()
+        current_screenshot = self.get_fresh_screenshot()
+        self.last_screenshot = current_screenshot
         
-        # Initial planning by master
-        planning_info = self.run_master_planning(user_query, current_image_base64)
+        # Master creates initial plan
+        master_plan = self.master_planning_phase(query, current_screenshot)
+        self.conversation_history.append({"role": "master", "content": master_plan})
+        print(f"Master plan: {master_plan}")
         
-        while not self.task_completed and self.iteration_count < self.max_iterations:
-            self.iteration_count += 1
-            print(f"\n--- Iteration {self.iteration_count} ---")
+        # Check if task is immediately complete (simple tasks)
+        if master_plan.get("role") == "verifier" and master_plan.get("status") == "complete":
+            print("Task completed in planning phase!")
+            return
+        
+        # Main execution loop
+        while self.retry_count < self.max_retries:
+            # Get current instruction from master
+            current_instruction = master_plan.get("instruction", query)
             
-            # Check if task is complete
-            if planning_info.get("tool") == "task_complete":
-                print("Task completed successfully by master planner.")
-                print(planning_info.get("summary", "Task completed."))
-                self.task_completed = True
+            # Slave execution
+            slave_result = self.slave_execution_phase(
+                current_instruction, 
+                current_screenshot,
+                self.conversation_history
+            )
+            
+            print(f"Slave action: {slave_result}")
+            
+            # Execute action if it's an action type
+            if slave_result.get("role") == "executor" and "program" in slave_result:
+                # Validate action before execution
+                is_valid, reason = self.validate_action(slave_result, current_screenshot)
+                
+                if is_valid:
+                    # Execute the action
+                    success = self.execute_action_program(slave_result["program"])
+                    
+                    # Wait for action to take effect
+                    time.sleep(2)
+                    
+                    # Get new screenshot
+                    new_screenshot = self.get_fresh_screenshot()
+                    
+                    # Record result
+                    execution_result = {
+                        "role": "executor",
+                        "result": "success" if success else "failure",
+                        "action": slave_result.get("action", "unknown"),
+                        "observation": "Action executed" if success else "Action failed",
+                        "screenshot_changed": new_screenshot != current_screenshot
+                    }
+                    
+                    self.conversation_history.append(execution_result)
+                    current_screenshot = new_screenshot
+                    self.last_screenshot = current_screenshot
+                    
+                    # Reset retry count on success
+                    if success:
+                        self.retry_count = 0
+                    else:
+                        self.retry_count += 1
+                else:
+                    print(f"Action validation failed: {reason}")
+                    self.retry_count += 1
+                    
+                    # Record validation failure
+                    self.conversation_history.append({
+                        "role": "executor", 
+                        "result": "validation_failed", 
+                        "reason": reason
+                    })
+            else:
+                # Handle non-action responses (results, errors, etc.)
+                self.conversation_history.append(slave_result)
+                
+                if slave_result.get("result") in ["success", "partial"]:
+                    self.retry_count = 0
+                else:
+                    self.retry_count += 1
+            
+            # Master verification
+            verification = self.master_verification_phase(
+                query, current_screenshot, self.conversation_history
+            )
+            
+            print(f"Master verification: {verification}")
+            
+            # Check for completion
+            if (verification.get("role") == "verifier" and 
+                verification.get("status") == "complete"):
+                print("Task completed successfully!")
                 break
             
-            # Slave execution phase
-            if planning_info.get("next_action_type") == "action":
-                action_info = self.run_slave_execution(planning_info, current_image_base64)
-                
-                if action_info.get("tool") == "action":
-                    # Execute the action
-                    success, message = self.execute_action(action_info)
-                    
-                    if success:
-                        print(f"Action executed: {action_info.get('description')}")
-                        
-                        # Wait briefly for screen to update
-                        time.sleep(1)
-                        
-                        # Get new screenshot for verification
-                        current_image_base64 = self.get_current_screenshot_data()
-                        
-                        # Master re-planning based on new state
-                        planning_info = self.run_master_planning(user_query, current_image_base64)
-                    else:
-                        print(f"Action failed: {message}")
-                        # Re-plan based on failure
-                        current_image_base64 = self.get_current_screenshot_data()
-                        planning_info = self.run_master_planning(user_query, current_image_base64)
-                else:
-                    print("Invalid action format, re-planning...")
-                    current_image_base64 = self.get_current_screenshot_data()
-                    planning_info = self.run_master_planning(user_query, current_image_base64)
-            else:
-                # Non-action planning, just update with new state
-                current_image_base64 = self.get_current_screenshot_data()
-                planning_info = self.run_master_planning(user_query, current_image_base64)
+            # Update master plan for next iteration if needed
+            if (verification.get("status") == "incomplete" and 
+                "next_instruction" in verification):
+                master_plan = {
+                    "role": "master",
+                    "instruction": verification["next_instruction"],
+                    "expectation": verification.get("reason", "Continue task")
+                }
+            
+            # Safety check - prevent infinite loops
+            if len(self.conversation_history) > 20:
+                print("Safety limit reached - stopping execution")
+                break
         
-        if not self.task_completed:
-            print(f"Task terminated after {self.max_iterations} iterations. Consider the task failed or needing manual intervention.")
+        if self.retry_count >= self.max_retries:
+            print(f"Task failed after {self.max_retries} retries")
+        
+        print("Task execution completed")
 
 
-def perform_task(query: str) -> None:
-    """Main function to run the master-slave GUI agent"""
-    agent = MasterSlaveGUIAgent()
-    agent.run(query)
+class OptimizedGUIAgent:
+    """Even more optimized version for common tasks"""
+    
+    def __init__(self):
+        self.agent = GUIAutomationAgent()
+        self.common_patterns = {
+            "browser_navigation": ["ctrl+l", "type_url", "enter"],
+            "search": ["ctrl+k", "type_query", "enter"],
+            "new_tab": ["ctrl+t"],
+            "close_tab": ["ctrl+w"],
+            "refresh": ["f5"]
+        }
+    
+    def perform_task_optimized(self, query: str) -> None:
+        """Optimized task performance with pattern recognition"""
+        # Check for common patterns to avoid unnecessary planning
+        lower_query = query.lower()
+        
+        # Direct pattern matching for common tasks
+        if any(pattern in lower_query for pattern in ["open website", "go to", "navigate to"]):
+            print("Using optimized browser navigation pattern")
+            self._handle_browser_navigation(query)
+        elif "search" in lower_query:
+            print("Using optimized search pattern")
+            self._handle_search(query)
+        else:
+            # Fall back to full master-slave architecture
+            self.agent.perform_task(query)
+    
+    def _handle_browser_navigation(self, query: str):
+        """Optimized handler for browser navigation"""
+        # Extract URL from query
+        url_match = re.search(r'(https?://[^\s]+|www\.[^\s]+)', query)
+        if url_match:
+            url = url_match.group(0)
+            # Direct execution without master planning
+            program = f"""
+import pyautogui
+pyautogui.hotkey('ctrl', 'l')  # Focus address bar
+pyautogui.write('{url}')
+pyautogui.press('enter')
+"""
+            self.agent.execute_action_program(program)
+            time.sleep(3)  # Wait for page load
+        else:
+            # Fall back to full architecture
+            self.agent.perform_task(query)
+    
+    def _handle_search(self, query: str):
+        """Optimized handler for search tasks"""
+        # Extract search query
+        search_terms = query.replace("search for", "").replace("search", "").strip()
+        
+        program = f"""
+import pyautogui
+pyautogui.hotkey('ctrl', 'k')  # Focus search box (common shortcut)
+pyautogui.write('{search_terms}')
+pyautogui.press('enter')
+"""
+        self.agent.execute_action_program(program)
+        time.sleep(2)
+
+
+def perform_task(query: str, optimized: bool = True) -> None:
+    """Main entry point with optimization option"""
+    if optimized:
+        agent = OptimizedGUIAgent()
+        agent.perform_task_optimized(query)
+    else:
+        agent = GUIAutomationAgent()
+        agent.perform_task(query)
 
 
 if __name__ == "__main__":
     user_query = input("Enter your request: ")
-    perform_task(user_query)
+    perform_task(user_query, optimized=True)
