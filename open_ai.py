@@ -45,7 +45,15 @@ program:
 Important Notes:
     1. Always analyze the current screenshot before taking any action.
     2. If an action does not lead to the expected result of the task, adjust your approach based on the new screenshot.
-"""
+    3. You will reason step-by-step before taking any action.
+Example:
+    query: program to open a new tab and navigate to a URL
+    initial screenshot: (screenshot of a browser)
+    reasoning: I need to open a new tab and navigate to a URL. To do this, I will:
+        1. Use the Ctrl+T shortcut to open a new tab.
+        2. Use the Ctrl+L shortcut to navigate to the URL.
+    action: {"tool": "action", "description": "Open a new tab and navigate to a URL.", "program": "pyautogui.hotkey('ctrl', 't'); pyautogui.hotkey('ctrl', 'l');"}
+    """
 
 
 def perform_task(query: str) -> None:
